@@ -1,15 +1,16 @@
-"""Stage A: historical calibration of the four key rates (File A -> File D)."""
+"""Stage A: historical calibration of the key rates (File A -> File D)."""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
 from .config import EngineConfig
-from .store import KEY_COLS
+from .curves import key_cols, key_labels
 
 
 def daily_changes(a: pd.DataFrame, cfg: EngineConfig) -> pd.DataFrame:
     """bp changes between consecutive valid days at most cfg.max_gap_days calendar days apart."""
+    KEY_COLS = key_cols(cfg.key_tenors)
     a = a[a["date"] >= pd.Timestamp(cfg.window_start)].sort_values("date").reset_index(drop=True)
     a = a[(a[KEY_COLS] > 0).all(axis=1)]
     gap = a["date"].diff().dt.days
@@ -20,6 +21,7 @@ def daily_changes(a: pd.DataFrame, cfg: EngineConfig) -> pd.DataFrame:
 
 
 def calibrate(a: pd.DataFrame, cfg: EngineConfig) -> tuple[dict, pd.DataFrame]:
+    KEY_COLS = key_cols(cfg.key_tenors)
     dy = daily_changes(a, cfg)
     if len(dy) < 30:
         raise ValueError(f"Only {len(dy)} usable daily changes in the window; need at least 30")
@@ -32,21 +34,25 @@ def calibrate(a: pd.DataFrame, cfg: EngineConfig) -> tuple[dict, pd.DataFrame]:
     eigval, eigvec = np.linalg.eigh(cov.values)
     order = np.argsort(eigval)[::-1]
     eigval, eigvec = eigval[order], eigvec[:, order]
-    # sign conventions: PC1 positive on average; PC2 steepener (30Y > 2Y); PC3 positive belly
+    # sign conventions: PC1 positive on average; PC2 steepener (longest key > shortest);
+    # PC3 positive belly (inner keys above the two ends)
+    n = len(KEY_COLS)
     if eigvec[:, 0].sum() < 0:
         eigvec[:, 0] *= -1
-    if eigvec[3, 1] - eigvec[0, 1] < 0:
+    if n > 1 and eigvec[-1, 1] - eigvec[0, 1] < 0:
         eigvec[:, 1] *= -1
-    if eigvec[1:3, 2].mean() - eigvec[[0, 3], 2].mean() < 0:
+    if n > 2 and eigvec[1:-1, 2].mean() - eigvec[[0, -1], 2].mean() < 0:
         eigvec[:, 2] *= -1
 
-    names = ["PC1_level", "PC2_slope", "PC3_curvature", "PC4"]
+    names = (["PC1_level", "PC2_slope", "PC3_curvature"] + [f"PC{i}" for i in range(4, n + 1)])[:n]
     calib = {
         "window_start": str(dy["date"].iloc[0].date()),
         "window_end": str(dy["date"].iloc[-1].date()),
         "config_window_start": cfg.window_start,
         "n_changes": int(len(dy)),
         "keys": KEY_COLS,
+        "tenors": [float(x) for x in cfg.key_tenors],
+        "labels": key_labels(cfg.key_tenors),
         "sigma_bp": sd.round(6).to_dict(),
         "robust_sigma_bp": mad.round(6).to_dict(),
         "cov_bp2": cov.round(8).values.tolist(),

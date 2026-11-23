@@ -7,14 +7,14 @@ import pytest
 from gsec_engine.bonds import Bond, dirty_price, instrument_from_bond, test_mode_instrument
 from gsec_engine.config import EngineConfig
 from gsec_engine.conventions import BusinessCalendar, days_30_360, settlement_date
-from gsec_engine.curves import BumpInterpolator, KeyRateCurve, NSCurve
+from gsec_engine.curves import SPEC_KEYS, BumpInterpolator, KeyRateCurve, NSCurve
 from gsec_engine.portfolio import make_position
 from gsec_engine.risk import PortfolioPricer, convexity, evaluate_scenario, krd_kr01
 from gsec_engine.store import NeedsReview, Store
 
 KR = [6.30, 6.87, 7.36, 7.88]
 CURVE = KeyRateCurve(KR)
-LIN = BumpInterpolator("linear")
+LIN = BumpInterpolator("linear", keys=SPEC_KEYS)     # spec v1.0: 2/5/10/30Y
 
 
 def pricer(*positions, interp=LIN):

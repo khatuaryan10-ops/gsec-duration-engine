@@ -170,3 +170,18 @@ First result (FBIL 16-Nov-2026, 115 bonds): own Svensson RMSE 6.3bp (traded 3.9b
 CCIL NS 24.7bp, with yields 41bp too low under 3Y and 10bp too high at 12-20Y. The portfolio's static
 data, accrued and yield maths match FBIL to 0.01bp; on CCIL's curve the three bonds are ₹2.03 cr below
 FBIL prices.
+
+## Key rates
+
+Key tenors are a setting (`EngineConfig.key_tenors`), default **2, 3, 5, 7, 10, 15, 30, 40Y**: one key per
+liquid on-the-run benchmark (6.20% 2029, 6.53% 2031, 6.57% 2033, 6.94% 2036, 7.06% 2041, 7.63% 2056,
+7.71% 2066), plus 2Y for the short end. 20Y and 50Y are left out (no traded 20Y benchmark; bumps are flat
+beyond 40Y). KRD/KR01, convexity, scenarios, Basel shocks, PCA and historical replay all follow the setting;
+the front end reads it from `GET /config` (`key_labels`).
+
+Changing the tenors rebuilds File A automatically from the stored NS parameters (same dates) and the next
+run recalibrates File D. The spec v1.0 tests (T1-T6) keep the original 2/5/10/30Y set (`SPEC_KEYS`).
+
+The history is a 4-parameter NS curve, so the 8 key-rate changes have at most ~4 independent directions:
+PC1-PC3 explain 99.5% and PC5-PC8 are ~0. Scenarios use PC1-PC3 only. More independent detail comes as
+own Svensson fits accumulate.

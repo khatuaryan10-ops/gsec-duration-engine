@@ -103,7 +103,22 @@ def test_portfolio_crud(client):
 
 def test_calibration(client):
     c = client.get("/calibration").json()
-    assert c["n_changes"] > 500 and len(c["sigma_bp"]) == 4
+    labels = client.get("/config").json()["key_labels"]
+    assert labels == ["2Y", "3Y", "5Y", "7Y", "10Y", "15Y", "30Y", "40Y"]
+    assert c["n_changes"] > 500 and len(c["sigma_bp"]) == len(labels) and c["labels"] == labels
+    assert len(c["loadings"]) == len(labels) and len(c["pc_names"]) == len(labels)
+
+
+def test_eight_key_rates(client):
+    j = client.post("/run", json={"date": VD, "write_reports": False}).json()
+    labels = j["key_labels"]
+    assert [k["key_rate"] for k in j["kr01_portfolio"]] == labels
+    assert sum(k["portfolio_KRD"] for k in j["kr01_portfolio"]) == pytest.approx(j["risk"]["portfolio_duration"], abs=1e-5)
+    assert all(f"move_{l}_bp" in j["scenarios"][0] for l in labels)
+    s = client.post("/scenarios/custom", json={"date": VD, "moves_bp": {"15Y": 10, "40Y": -5}}).json()
+    assert s["moves_bp"]["15Y"] == 10 and s["moves_bp"]["2Y"] == 0
+    r = client.post("/scenarios/custom", json={"date": VD, "moves_bp": {"12Y": 10}})
+    assert r.status_code == 422 and "12Y" in r.json()["detail"]
 
 
 def test_ui_served(client):

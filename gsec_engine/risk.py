@@ -1,6 +1,6 @@
 """Stage H: KRD/KR01, convexity, PC exposures, scenarios and historical replay.
 
-Bumps are added on top of today's curve; a key-rate move vector (bp at 2/5/10/30Y) is spread
+Bumps are added on top of today's curve; a key-rate move vector (bp at each key tenor) is spread
 across maturities by the chosen interpolation, and every cash flow is fully repriced.
 """
 from __future__ import annotations
@@ -9,11 +9,15 @@ import numpy as np
 import pandas as pd
 
 from .config import EngineConfig
-from .curves import KEYS, SPACES, BumpInterpolator, ParShift, ShiftedCurve
+from .curves import KEYS, SPACES, BumpInterpolator, ParShift, ShiftedCurve, key_cols, key_labels
 from .portfolio import Position
 
 BP = 1e-4
-KEY_LABELS = [f"{k:g}Y" for k in KEYS]
+KEY_LABELS = key_labels(KEYS)                 # default set; runs use the interpolator's keys
+
+
+def calib_matches(calib: dict, keys) -> bool:
+    return [float(x) for x in calib.get("tenors", [])] == [float(x) for x in np.asarray(keys, float)]
 
 
 class PortfolioPricer:
@@ -33,6 +37,8 @@ class PortfolioPricer:
                                    for i, p in enumerate(positions)])
         self.face = np.array([p.signed_face for p in positions])
         self.z0 = base_curve.zero(self.t)
+        self.keys = np.asarray(interp.keys, float)
+        self.labels = key_labels(self.keys)
 
     def shift_bp(self, v_bp) -> np.ndarray:
         """Zero-rate change (bp) at every cash-flow time for key-rate moves v (bp)."""
@@ -54,7 +60,7 @@ class PortfolioPricer:
 
 
 def krd_kr01(pp: PortfolioPricer, bump_bp: float = 1.0) -> dict:
-    n = len(KEYS)
+    n = len(pp.keys)
     P0 = pp.prices()
     MV0 = P0 * pp.face / 100.0
     krd = np.zeros((len(P0), n))
@@ -68,11 +74,11 @@ def krd_kr01(pp: PortfolioPricer, bump_bp: float = 1.0) -> dict:
     kr01 = krd * MV0[:, None] * BP                       # Rs lost if that key rate rises 1bp
 
     names = [p.pos_id for p in pp.positions]
-    krd_df = pd.DataFrame(krd, index=names, columns=[f"KRD_{k}" for k in KEY_LABELS])
+    krd_df = pd.DataFrame(krd, index=names, columns=[f"KRD_{k}" for k in pp.labels])
     krd_df["sum_KRD"] = krd.sum(axis=1)
     krd_df["parallel_duration"] = dur_par
     krd_df["check_diff"] = krd_df["sum_KRD"] - dur_par
-    kr01_df = pd.DataFrame(kr01, index=names, columns=[f"KR01_{k}" for k in KEY_LABELS])
+    kr01_df = pd.DataFrame(kr01, index=names, columns=[f"KR01_{k}" for k in pp.labels])
     kr01_df["total_KR01"] = kr01.sum(axis=1)
 
     net = kr01.sum(axis=0)
@@ -90,7 +96,7 @@ def krd_kr01(pp: PortfolioPricer, bump_bp: float = 1.0) -> dict:
 
 
 def convexity(pp: PortfolioPricer, bump_bp: float = 10.0) -> dict:
-    n = len(KEYS)
+    n = len(pp.keys)
     v = np.full(n, bump_bp)
     dy = bump_bp * BP
     P0, Pu, Pd = pp.prices(), pp.prices(v), pp.prices(-v)
@@ -112,20 +118,21 @@ def pc_exposures(net_kr01: np.ndarray, calib: dict) -> pd.DataFrame:
     for j, name in enumerate(calib["pc_names"][:3]):
         per_bp = float(net_kr01 @ L[:, j])
         rows.append({"pc": name, "sigma_bp": s[j], "explained": calib["explained"][j],
-                     "loadings": dict(zip(KEY_LABELS, L[:, j].round(4))),
+                     "loadings": dict(zip(calib.get("labels", KEY_LABELS), L[:, j].round(4))),
                      "loss_per_unit_loading_inr": per_bp,
                      "loss_per_1sigma_inr": per_bp * s[j]})
     return pd.DataFrame(rows)
 
 
-def basel_vectors(cfg: EngineConfig) -> dict:
+def basel_vectors(cfg: EngineConfig, keys=None) -> dict:
     """BCBS IRRBB shapes evaluated at the key tenors (x = 4)."""
+    K = np.asarray(cfg.key_tenors if keys is None else keys, float)
     p, s, l = (cfg.basel_inr_bp[k] for k in ("parallel", "short", "long"))
-    S = s * np.exp(-KEYS / 4.0)
-    Lg = l * (1.0 - np.exp(-KEYS / 4.0))
+    S = s * np.exp(-K / 4.0)
+    Lg = l * (1.0 - np.exp(-K / 4.0))
     return {
-        "Basel parallel up": np.full(len(KEYS), p),
-        "Basel parallel down": np.full(len(KEYS), -p),
+        "Basel parallel up": np.full(len(K), p),
+        "Basel parallel down": np.full(len(K), -p),
         "Basel steepener": -0.65 * np.abs(S) + 0.9 * np.abs(Lg),
         "Basel flattener": 0.8 * np.abs(S) - 0.6 * np.abs(Lg),
         "Basel short up": S,
@@ -135,10 +142,12 @@ def basel_vectors(cfg: EngineConfig) -> dict:
 
 def build_scenarios(calib: dict, cfg: EngineConfig) -> list[tuple[str, str, np.ndarray]]:
     out = []
+    keys = np.asarray(calib["tenors"], float)
+    n = len(keys)
     sig = np.array([calib["sigma_bp"][k] for k in calib["keys"]])
-    for k, lab in enumerate(KEY_LABELS):
+    for k, lab in enumerate(key_labels(keys)):
         for m in (-2, -1, 1, 2):
-            v = np.zeros(len(KEYS))
+            v = np.zeros(n)
             v[k] = m * sig[k]
             out.append((f"{lab} {m:+d}σ", "key rate", v))
     L = np.array(calib["loadings"])
@@ -146,8 +155,8 @@ def build_scenarios(calib: dict, cfg: EngineConfig) -> list[tuple[str, str, np.n
         for m in (-2, -1, 1, 2):
             out.append((f"{name} {m:+d}σ", "PCA", m * calib["pc_sigma_bp"][j] * L[:, j]))
     for b in cfg.parallel_bp:
-        out.append((f"Parallel {b:+g}bp", "parallel", np.full(len(KEYS), float(b))))
-    for name, v in basel_vectors(cfg).items():
+        out.append((f"Parallel {b:+g}bp", "parallel", np.full(n, float(b))))
+    for name, v in basel_vectors(cfg, keys).items():
         out.append((name, "Basel IRRBB", v))
     return out
 
@@ -172,7 +181,7 @@ def scenario_table(pp: PortfolioPricer, sens: dict, calib: dict, cfg: EngineConf
     for name, group, v in build_scenarios(calib, cfg):
         r = evaluate_scenario(pp, sens["net_kr01"], V0, v, cfg.convexity_bump_bp)
         rows.append({"scenario": name, "group": group,
-                     **{f"move_{l}_bp": round(x, 3) for l, x in zip(KEY_LABELS, v)},
+                     **{f"move_{l}_bp": round(x, 3) for l, x in zip(pp.labels, v)},
                      **r, "full_reprice_pct_of_net_mv": r["full_reprice"] / V0 * 100 if V0 else np.nan,
                      "convexity_gap_inr": r["full_reprice"] - r["duration_only"],
                      "residual_after_convexity_inr": r["full_reprice"] - r["duration_convexity"]})
@@ -181,7 +190,10 @@ def scenario_table(pp: PortfolioPricer, sens: dict, calib: dict, cfg: EngineConf
 
 def historical_replay(pp: PortfolioPricer, scen: pd.DataFrame, cfg: EngineConfig) -> dict:
     V0 = pp.total()
-    cols = ["r2", "r5", "r10", "r30"]
+    cols = key_cols(pp.keys)
+    missing = [c for c in cols if c not in scen]
+    if missing:
+        raise ValueError(f"historical scenarios lack key columns {missing}: recalibrate (File D)")
     pnl = np.array([pp.total(row) - V0 for row in scen[cols].values])
     df = pd.DataFrame({"date": scen["date"].values, **{c: scen[c].values for c in cols},
                        "pnl_inr": pnl})

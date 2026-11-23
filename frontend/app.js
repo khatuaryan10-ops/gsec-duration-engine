@@ -4,7 +4,21 @@
   const html = htm.bind(React.createElement);
   const { GroupedBars, LineChart, Histogram, DBar } = window.Charts;
 
-  const KEYS = ["2Y", "5Y", "10Y", "30Y"];
+  /* key tenors come from GET /config (engine setting key_tenors); set in App before pages render */
+  let KEYS = ["2Y", "3Y", "5Y", "7Y", "10Y", "15Y", "30Y", "40Y"];
+  let KEY_T = [2, 3, 5, 7, 10, 15, 30, 40];
+  const kcol = (t) => "r" + String(t);                       // history columns: r2, r15, ...
+  const keyMarkers = () => KEY_T.map((t) => ({ x: t, label: t + "Y" }));
+  /* a shape given at 2/5/10/30Y, linearly interpolated (flat outside) onto the configured keys */
+  const shapeAt = (anchors) => {
+    const A = [2, 5, 10, 30];
+    return KEY_T.map((t) => {
+      if (t <= A[0]) return anchors[0];
+      if (t >= A[3]) return anchors[3];
+      const i = A.findIndex((a, j) => t >= a && t <= A[j + 1]);
+      return Math.round(anchors[i] + (anchors[i + 1] - anchors[i]) * (t - A[i]) / (A[i + 1] - A[i]));
+    });
+  };
   const SLOTS = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)", "var(--s6)", "var(--s7)", "var(--s8)"];
   const API = window.GSEC_API || "";
   const CURVES = { ccil: "CCIL NS", own: "Own Svensson (FBIL)" };
@@ -244,7 +258,7 @@
           <h3 style=${{ fontSize: 13, margin: "12px 0 4px" }}>Worst 5 days</h3>
           <${Table} columns=${[
             { key: "date", label: "Date" },
-            ...["r2", "r5", "r10", "r30"].map((k, i) => ({ key: k, label: `${KEYS[i]} bp`, n: true, render: (w) => fmtN(w[k], 1) })),
+            ...KEY_T.map((t, i) => ({ key: kcol(t), label: `${KEYS[i]} bp`, n: true, render: (w) => fmtN(w[kcol(t)], 1) })),
             { key: "pnl", label: "P&L (₹ cr)", n: true, cls: (w) => pnlClass(w.pnl_inr), render: (w) => signed(cr(w.pnl_inr)) },
           ]} rows=${d.historical.worst5} />
         <//>
@@ -299,7 +313,7 @@
     ];
     const names = [...KEYS, "Parallel"];
     const series = names.map((k, i) => ({
-      name: k, color: SLOTS[i], dashed: k === "Parallel",
+      name: k, color: k === "Parallel" ? "var(--ink-2)" : SLOTS[i % SLOTS.length], dashed: k === "Parallel",
       points: d.grid_crore.filter((g) => g.key_rate === k).map((g) => ({ x: g.shift_bp, y: MODES[mode](g) })),
     }));
     const shifts = [...new Set(d.grid_crore.map((g) => g.shift_bp))];
@@ -344,7 +358,7 @@
   };
 
   function ScenarioPage({ p }) {
-    const [moves, setMoves] = useState([25, 25, 25, 25]);
+    const [moves, setMoves] = useState(() => KEYS.map(() => 25));
     const [space, setSpace] = useState("Spot");
     const [res, setRes] = useState(null);
     const [err, setErr] = useState(null);
@@ -374,7 +388,7 @@
           <div className="row" style=${{ marginBottom: 10 }}>
             <${Field} label="Moves apply to"><${Chips} options=${["Spot", "Par"]} value=${space} onChange=${setSpace} /><//></div>
           <div className="chips" style=${{ marginBottom: 14 }}>${Object.entries(PRESETS).map(([k, v]) =>
-            html`<button key=${k} className="chip" onClick=${() => setMoves(v)}>${k}</button>`)}</div>
+            html`<button key=${k} className="chip" onClick=${() => setMoves(shapeAt(v))}>${k}</button>`)}</div>
           ${KEYS.map((k, i) => html`<div className="slider-row" key=${k}>
             <b>${k}</b>
             <input type="range" min="-200" max="200" step="1" value=${moves[i]} aria-label=${`${k} move in bp`}
@@ -476,7 +490,7 @@
           ${L && html`<p className="sub">Curve used for ${p.date}: <b>${L.date}</b> (${L.source})
             ${L.stale && html` <span className="badge warn">stale</span>`} · β0 ${L.b0}, β1 ${L.b1}, β2 ${L.b2}, τ ${L.tau}</p>`}
           ${series.length > 0 && html`<${LineChart} series=${series} height=${300} xLabel="Tenor (years)" yLabel="Rate (%)"
-            xTicks=${[0, 5, 10, 15, 20, 25, 30, 35, 40]} markers=${[2, 5, 10, 30].map((t) => ({ x: t, label: t + "Y" }))}
+            xTicks=${[0, 5, 10, 15, 20, 25, 30, 35, 40]} markers=${keyMarkers()}
             xFmt=${(v) => fmtN(v, v % 1 ? 2 : 0)} yFmt=${(v) => fmtN(v, 3)} />`}
           ${L && html`<${Table} columns=${[{ key: "b", label: "Key rate" },
               ...KEYS.map((k) => ({ key: k, label: k, n: true, render: (r) => fmtN(r[k], 4) + "%" }))]}
@@ -763,7 +777,7 @@
         <${Card} title="Curves" sub=${view === "Zero rates" ? "Zero (spot) rates, %, continuously compounded" : "Semi-annual par yields (%) and FBIL bond YTMs by residual maturity"}
           right=${html`<${Chips} options=${["Par yields & bonds", "Zero rates"]} value=${view} onChange=${setView} />`}>
           <${LineChart} series=${curveSeries} height=${320} xLabel="Maturity (years)" yLabel="Rate (%)"
-            xTicks=${[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50]} markers=${[2, 5, 10, 30].map((t) => ({ x: t, label: t + "Y" }))}
+            xTicks=${[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50]} markers=${keyMarkers()}
             xFmt=${(v) => fmtN(v, v % 1 ? 2 : 0)} yFmt=${(v) => fmtN(v, 3)} />
         <//>
         <${Card} title="Fit errors by bond" sub="Model yield − FBIL yield, bp. Points near zero = the curve reprices that bond.">
@@ -836,6 +850,8 @@
     const [theme, setTheme] = useState(document.documentElement.dataset.theme || "");
     const [rev, setRev] = useState(0);                      // bump to refetch after data changes
     const health = useApi(() => api("/health"), [rev]);
+    const conf = useApi(() => api("/config"), []);
+    if (conf.data && conf.data.key_labels) { KEYS = conf.data.key_labels; KEY_T = conf.data.key_tenors.map(Number); }
 
     useEffect(() => { store.set("gsec-tab", tab); history.replaceState(null, "", "#" + encodeURIComponent(tab)); }, [tab]);
     useEffect(() => { store.set("gsec-interp", interp); }, [interp]);
@@ -887,7 +903,7 @@
       </header>
       <main>
         ${health.error && html`<${ErrorBox} error=${new Error("Cannot reach the API. Start it with: uvicorn gsec_engine.api:app")} />`}
-        ${page}
+        ${conf.data ? page : conf.error ? null : html`<${Loading} on=${true} />`}
       </main>`;
   }
 

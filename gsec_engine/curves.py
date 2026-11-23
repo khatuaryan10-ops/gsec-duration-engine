@@ -7,7 +7,17 @@ from __future__ import annotations
 import numpy as np
 from scipy.interpolate import CubicSpline, PchipInterpolator
 
-KEYS = np.array([2.0, 5.0, 10.0, 30.0])
+SPEC_KEYS = np.array([2.0, 5.0, 10.0, 30.0])                    # spec v1.0 test mode (T1-T6)
+KEYS = np.array([2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 30.0, 40.0])     # default key tenors: liquid benchmarks
+
+
+def key_labels(keys) -> list[str]:
+    return [f"{k:g}Y" for k in np.asarray(keys, float)]
+
+
+def key_cols(keys) -> list[str]:
+    """File A / history column names, e.g. r2, r15."""
+    return [f"r{k:g}" for k in np.asarray(keys, float)]
 
 
 class NSCurve:
@@ -58,7 +68,7 @@ class SvenssonCurve:
 class KeyRateCurve:
     """Test-mode curve: linear interpolation of key rates, flat outside [2Y, 30Y]."""
 
-    def __init__(self, rates, keys=KEYS, label: str = "test-mode"):
+    def __init__(self, rates, keys=SPEC_KEYS, label: str = "test-mode"):
         self.keys, self.rates, self.label = np.asarray(keys, float), np.asarray(rates, float), label
 
     def zero(self, t):

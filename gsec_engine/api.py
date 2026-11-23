@@ -30,13 +30,13 @@ from pydantic import BaseModel, Field, field_validator
 from . import plots, yieldbuilder
 from .config import ROOT, EngineConfig
 from .conventions import settlement_date, to_date
-from .curves import KEYS, BumpInterpolator, ParShift
+from .curves import BumpInterpolator, ParShift, key_labels
 from .engine import RunResult, run, run_calibration
 from .portfolio import positions_from_file
-from .risk import KEY_LABELS, PortfolioPricer, evaluate_scenario, krd_kr01
+from .risk import PortfolioPricer, evaluate_scenario, krd_kr01
 from .stage0 import time_basis_test
 from .bonds import parse_coupon_dates
-from .store import C_COLS, KEY_COLS, NeedsReview, Store, bond_from_row
+from .store import C_COLS, NeedsReview, Store, bond_from_row
 
 Interp = Literal["linear", "cubic", "pchip"]
 Basis = Literal["ACT/365", "30/360"]
@@ -132,8 +132,9 @@ class CustomScenario(Options):
     date: Date = Field(default_factory=Date.today)
     space: Space = Field("spot", description="'spot': moves are zero-rate moves; 'par': par-yield "
                                              "moves with the zero curve re-bootstrapped")
-    moves_bp: dict[Literal["2Y", "5Y", "10Y", "30Y"], float] = Field(
-        description="key-rate moves in bp; missing keys are 0, e.g. {'2Y': 25, '10Y': -10}")
+    moves_bp: dict[str, float] = Field(
+        description="key-rate moves in bp by key label (see GET /config key_labels); missing keys "
+                    "are 0, e.g. {'2Y': 25, '10Y': -10}")
 
 
 # ---------------------------------------------------------------- app factory
@@ -144,6 +145,8 @@ def create_app(cfg: EngineConfig | None = None) -> FastAPI:
     if os.getenv("GSEC_OUTPUT_DIR"):
         base = dataclasses.replace(base, output_dir=Path(os.environ["GSEC_OUTPUT_DIR"]))
     lock = threading.RLock()        # file stores are CSV/JSON: serialise writes
+    KEYS = np.asarray(base.key_tenors, float)
+    KEY_LABELS = key_labels(KEYS)
 
     app = FastAPI(title="G-Sec Duration Engine API", version="1.0",
                   description="Valuation, KRD/KR01, convexity, PCA exposures, scenarios and "
@@ -196,7 +199,7 @@ def create_app(cfg: EngineConfig | None = None) -> FastAPI:
 
     @app.get("/config", tags=["meta"])
     def config():
-        return jsonable(base.to_dict())
+        return {**jsonable(base.to_dict()), "key_labels": KEY_LABELS}
 
     @app.get("/calendar", tags=["meta"])
     def calendar(on: Date = Query(alias="date")):
@@ -227,7 +230,7 @@ def create_app(cfg: EngineConfig | None = None) -> FastAPI:
         """Dry run of Stage B: nothing is stored."""
         r = store().validate_ns(x.date, x.b0, x.b1, x.b2, x.tau, correction=x.correction)
         return {"ok": r.ok, "errors": r.errors, "warnings": r.warnings, "review": r.review,
-                "key_rates_pct": {l: float(r.key_rates[k]) for l, k in zip(KEY_LABELS, KEY_COLS)}
+                "key_rates_pct": {l: float(r.key_rates[k]) for l, k in zip(KEY_LABELS, store().key_cols)}
                 if r.key_rates else {}}
 
     @app.post("/ns", status_code=201, tags=["curve"])
@@ -236,7 +239,7 @@ def create_app(cfg: EngineConfig | None = None) -> FastAPI:
             r = store().add_ns_row(x.date, x.b0, x.b1, x.b2, x.tau, x.source, notes=x.notes,
                                    correction=x.correction, accept_review=x.accept_review)
         return {"stored": str(x.date), "warnings": r.warnings, "reviewed": r.review,
-                "key_rates_pct": {l: float(r.key_rates[k]) for l, k in zip(KEY_LABELS, KEY_COLS)},
+                "key_rates_pct": {l: float(r.key_rates[k]) for l, k in zip(KEY_LABELS, store().key_cols)},
                 "note": "calibration (File D) is not refreshed automatically; POST /calibration"}
 
     @app.post("/ns/import", tags=["curve"])
@@ -373,6 +376,7 @@ def create_app(cfg: EngineConfig | None = None) -> FastAPI:
             "curve_comparison": {**jsonable({k: v for k, v in r.curve_compare.items() if k != "rows"}),
                                  "rows": records(r.curve_compare.get("rows"))},
             "output_dir": str(r.output_dir) if r.output_dir else None,
+            "key_tenors": KEYS.tolist(), "key_labels": KEY_LABELS,
         }
         if include_pnl:
             out["historical"]["pnl"] = records(r.hist["pnl"])
@@ -396,7 +400,10 @@ def create_app(cfg: EngineConfig | None = None) -> FastAPI:
         positions = positions_from_file(s.load_C(), settle, cal, curve, c)
         if not positions:
             raise LookupError("Portfolio (File C) is empty")
-        pp = PortfolioPricer(positions, curve, BumpInterpolator(c.interpolation), space=req.space)
+        bad = sorted(set(req.moves_bp) - set(KEY_LABELS))
+        if bad:
+            raise ValueError(f"unknown key rate(s) {bad}; use {KEY_LABELS}")
+        pp = PortfolioPricer(positions, curve, BumpInterpolator(c.interpolation, keys=KEYS), space=req.space)
         sens = krd_kr01(pp, c.kr_bump_bp)
         v = np.array([req.moves_bp.get(l, 0.0) for l in KEY_LABELS])
         res = evaluate_scenario(pp, sens["net_kr01"], sens["net_mv"], v, c.convexity_bump_bp)

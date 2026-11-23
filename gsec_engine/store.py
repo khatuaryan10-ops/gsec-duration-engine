@@ -12,9 +12,9 @@ import pandas as pd
 from .bonds import Bond, parse_coupon_dates
 from .config import EngineConfig
 from .conventions import BusinessCalendar, to_date
-from .curves import KEYS, NSCurve, SvenssonCurve
+from .curves import KEYS, NSCurve, SvenssonCurve, key_cols
 
-KEY_COLS = ["r2", "r5", "r10", "r30"]
+KEY_COLS = key_cols(KEYS)              # default; a Store uses the tenors of its config
 B_COLS = ["date", "b0", "b1", "b2", "tau", "source", "entered_at", "flags", "notes"]
 C_COLS = ["pos_id", "name", "isin", "coupon", "issue_date", "maturity_date", "coupon_dates",
           "direction", "size_type", "size_inr", "opened_on"]
@@ -51,6 +51,8 @@ class Store:
         self.path_G = d / "G_fitted_curves.csv"
         self.path_hol = d / "holidays.csv"
         self.path_import_log = d / "import_log.csv"
+        self.keys = np.asarray(cfg.key_tenors, float)
+        self.key_cols = key_cols(self.keys)
 
     # ---------- calendar ----------
     def calendar(self) -> BusinessCalendar:
@@ -59,11 +61,33 @@ class Store:
     # ---------- File A ----------
     def load_A(self) -> pd.DataFrame:
         if not self.path_A.exists():
-            df = pd.DataFrame(columns=["date"] + KEY_COLS + ["source"])
+            df = pd.DataFrame(columns=["date"] + self.key_cols + ["source"])
             df["date"] = pd.to_datetime(df["date"])
             return df
         df = pd.read_csv(self.path_A, parse_dates=["date"])
+        if any(c not in df for c in self.key_cols):
+            df = self.rebuild_A(df)
         return df.sort_values("date").reset_index(drop=True)
+
+    def rebuild_A(self, a: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Recompute File A at the configured key tenors from the stored NS rows (File B), for the
+        same dates File A already holds. Called automatically when the key tenors change."""
+        if a is None:
+            a = pd.read_csv(self.path_A, parse_dates=["date"]) if self.path_A.exists() else None
+        b = self.load_B()
+        if a is None or a.empty or b.empty:
+            return pd.DataFrame(columns=["date"] + self.key_cols + ["source"])
+        b = b.sort_values(["date", "entered_at"]).drop_duplicates("date", keep="last").set_index("date")
+        rows = []
+        for r in a.itertuples(index=False):
+            if r.date not in b.index:
+                continue                                   # seed rows without NS parameters
+            n = b.loc[r.date]
+            z = NSCurve(float(n.b0), float(n.b1), float(n.b2), float(n.tau)).zero(self.keys)
+            rows.append({"date": r.date, **dict(zip(self.key_cols, z)), "source": r.source})
+        out = pd.DataFrame(rows, columns=["date"] + self.key_cols + ["source"])
+        self.save_A(out)
+        return out
 
     def save_A(self, df: pd.DataFrame):
         df = df.sort_values("date", kind="stable").drop_duplicates("date", keep="last")
@@ -150,8 +174,8 @@ class Store:
             return res
 
         curve = NSCurve(b0, b1, b2, tau)
-        rates = curve.zero(KEYS)
-        res.key_rates = dict(zip(KEY_COLS, rates))
+        rates = curve.zero(self.keys)
+        res.key_rates = dict(zip(self.key_cols, rates))
         if cfg.repo_rate is not None and abs(b0 + b1 - cfg.repo_rate) * 100 > cfg.short_rate_warn_bp:
             res.warnings.append(f"short rate b0+b1={b0 + b1:.2f}% vs repo {cfg.repo_rate:.2f}%")
         if abs(curve.zero(40.0) - b0) * 100 > cfg.long_rate_warn_bp:
@@ -159,7 +183,7 @@ class Store:
         if prev_rates is None:
             a = self.load_A()
             a = a[a["date"].dt.date < d]
-            prev_rates = a[KEY_COLS].iloc[-1].values if len(a) else None
+            prev_rates = a[self.key_cols].iloc[-1].values if len(a) else None
             prev_date = a["date"].iloc[-1].date() if len(a) else None
         if prev_rates is not None and prev_date is not None and (d - prev_date).days > 7:
             res.warnings.append(f"previous stored day {prev_date} is over 7 days earlier: "
@@ -167,7 +191,7 @@ class Store:
             prev_rates = None
         if prev_rates is not None:
             moves = (rates - np.asarray(prev_rates, float)) * 100
-            for k, mv in zip(KEYS, moves):
+            for k, mv in zip(self.keys, moves):
                 if abs(mv) > cfg.jump_flag_bp:
                     res.review.append(f"{k:g}Y moved {mv:+.1f}bp vs previous stored day")
         return res
@@ -260,9 +284,13 @@ class Store:
         df = pd.read_csv(path)
         df["date"] = pd.to_datetime(df["Date"], format="%d-%m-%Y")
         df = df[df["date"] >= pd.Timestamp(self.cfg.window_start)]
-        out = pd.DataFrame({"date": df["date"], "r2": df["2"], "r5": df["5"], "r10": df["10"],
-                            "r30": df["30"], "source": "seed:spot-csv(2dp)"})
-        out = out[(out[KEY_COLS] > 0).all(axis=1)]
+        src = [f"{k:g}" for k in self.keys]
+        missing = [c for c in src if c not in df]
+        if missing:
+            raise ValueError(f"spot-rate table has no columns for tenors {missing}")
+        out = pd.DataFrame({"date": df["date"], **{c: df[s] for c, s in zip(self.key_cols, src)},
+                            "source": "seed:spot-csv(2dp)"})
+        out = out[(out[self.key_cols] > 0).all(axis=1)]
         existing = self.load_A()
         keep = existing[~existing["source"].astype(str).str.startswith("seed")]
         merged = pd.concat([out, keep], ignore_index=True)        # NS-derived rows win

@@ -13,7 +13,7 @@ class EngineConfig:
     time_basis: str = "ACT/365"            # or "30/360"; settled by the Stage 0 test
     interpolation: str = "linear"          # "linear" | "cubic" | "pchip"
     curve_source: str = "ccil"             # "ccil": CCIL NS (File B) | "own": Svensson fitted to FBIL (File G)
-    key_tenors: tuple = (2.0, 5.0, 10.0, 30.0)
+    key_tenors: tuple = (2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 30.0, 40.0)   # one key per liquid benchmark
     settlement_lag: int = 1                # T+1 business day
     kr_bump_bp: float = 1.0
     convexity_bump_bp: float = 10.0

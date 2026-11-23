@@ -16,14 +16,15 @@ import pandas as pd
 
 from .config import EngineConfig
 from .conventions import settlement_date, to_date
-from .curves import KEYS, BumpInterpolator
+from .curves import BumpInterpolator, key_labels
 from .portfolio import positions_from_file
-from .risk import BP, KEY_LABELS, PortfolioPricer, krd_kr01
+from .risk import BP, PortfolioPricer, krd_kr01
 from .store import Store
 
 CR = 1e7
 # reference palette (light), fixed categorical order
 S1, S2, S3, S4, S5 = "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"
+PALETTE = [S1, S2, S3, S4, S5, "#008300", "#6250d6", "#e34948", "#52514e", "#898781"]
 SURFACE, INK, INK2, MUTED, GRID, AXIS = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
 
 plt.rcParams.update({
@@ -38,7 +39,7 @@ plt.rcParams.update({
 
 def key_rate_convexity(pp: PortfolioPricer, bump_bp: float = 10.0) -> dict:
     """KRC_k = (P(+h e_k) + P(-h e_k) - 2P0) / (P0 h^2), per position and for the portfolio."""
-    n = len(KEYS)
+    n = len(pp.keys)
     P0, V0 = pp.prices(), pp.values()
     h = bump_bp * BP
     krc = np.zeros((len(P0), n))
@@ -51,7 +52,7 @@ def key_rate_convexity(pp: PortfolioPricer, bump_bp: float = 10.0) -> dict:
     par = np.full(n, bump_bp)
     c_par = (pp.prices(par) + pp.prices(-par) - 2 * P0) / (P0 * h ** 2)
     names = [p.pos_id for p in pp.positions]
-    df = pd.DataFrame(krc, index=names, columns=[f"KRC_{l}" for l in KEY_LABELS])
+    df = pd.DataFrame(krc, index=names, columns=[f"KRC_{l}" for l in pp.labels])
     df["sum_KRC"] = krc.sum(axis=1)
     df["parallel_convexity"] = c_par
     port = dollar.sum(axis=0) / V0.sum()
@@ -64,9 +65,9 @@ def bump_grid(pp: PortfolioPricer, net_kr01, dollar_krc, max_bp=50, step=5) -> p
     V0 = pp.total()
     shifts = np.arange(-max_bp, max_bp + step / 2, step)
     rows = []
-    n = len(KEYS)
+    n = len(pp.keys)
     dollar_k = dollar_krc.sum(axis=0)
-    for k, lab in enumerate(KEY_LABELS + ["Parallel"]):
+    for k, lab in enumerate(pp.labels + ["Parallel"]):
         for s in shifts:
             v = np.full(n, s) if lab == "Parallel" else np.eye(n)[k] * s
             full = pp.total(v) - V0
@@ -119,7 +120,7 @@ def ladder(valuation_date, cfg: EngineConfig | None = None, store: Store | None 
     settle = settlement_date(vd, cal, cfg.settlement_lag)
     curve, ns = store.curve_for(vd, cfg.curve_source)
     positions = positions_from_file(store.load_C(), settle, cal, curve, cfg)
-    pp = PortfolioPricer(positions, curve, BumpInterpolator(cfg.interpolation), space=space)
+    pp = PortfolioPricer(positions, curve, BumpInterpolator(cfg.interpolation, keys=cfg.key_tenors), space=space)
     sens = krd_kr01(pp, cfg.kr_bump_bp)
     krc = key_rate_convexity(pp, cfg.convexity_bump_bp)
     grid = bump_grid(pp, sens["net_kr01"], krc["dollar"], max_bp, step)
@@ -144,13 +145,13 @@ def make_charts(valuation_date, cfg: EngineConfig | None = None, max_bp=50, step
 
     # 1-2: KRD and KRC
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.6))
-    krd = sens["krd"][[f"KRD_{l}" for l in KEY_LABELS]].values
+    krd = sens["krd"][[f"KRD_{l}" for l in key_labels(cfg.key_tenors)]].values
     series = [(n, krd[i]) for i, n in enumerate(names)] + [("Portfolio", sens["portfolio_krd"])]
-    grouped_bars(axes[0], None, KEY_LABELS, series, [S1, S2, S3],
+    grouped_bars(axes[0], None, key_labels(cfg.key_tenors), series, [S1, S2, S3],
                  f"Key-rate duration (sum: portfolio {sens['portfolio_duration']:.2f})", "KRD (years)")
-    krcv = krc["table"][[f"KRC_{l}" for l in KEY_LABELS]].values
+    krcv = krc["table"][[f"KRC_{l}" for l in key_labels(cfg.key_tenors)]].values
     series = [(n, krcv[i]) for i, n in enumerate(names)] + [("Portfolio", krc["portfolio"])]
-    grouped_bars(axes[1], None, KEY_LABELS, series, [S1, S2, S3],
+    grouped_bars(axes[1], None, key_labels(cfg.key_tenors), series, [S1, S2, S3],
                  f"Key-rate convexity (sum {krc['portfolio'].sum():.1f}; parallel convexity "
                  f"{krc['portfolio_parallel']:.1f})", "KRC")
     fig.suptitle(sub, x=0.01, ha="left", fontsize=8.5, color=INK2)
@@ -160,7 +161,7 @@ def make_charts(valuation_date, cfg: EngineConfig | None = None, max_bp=50, step
 
     # 3: dMV for each key rate bumped alone, plus parallel, one axis
     fig, ax = plt.subplots(figsize=(10, 5.6))
-    colors = dict(zip(KEY_LABELS + ["Parallel"], [S1, S2, S3, S4, S5]))
+    colors = dict(zip(key_labels(cfg.key_tenors) + ["Parallel"], PALETTE))
     for lab, g in grid.groupby("key_rate", sort=False):
         ax.plot(g.shift_bp, g.full_reprice_cr, color=colors[lab], label=lab,
                 linestyle="--" if lab == "Parallel" else "-",
@@ -203,7 +204,7 @@ def make_charts(valuation_date, cfg: EngineConfig | None = None, max_bp=50, step
     # tables (the table view for the charts)
     krc["table"].to_csv(out / f"krc_{tag}.csv")
     grid.to_csv(out / f"keyrate_bump_grid_{tag}.csv", index=False)
-    wide = grid.pivot(index="shift_bp", columns="key_rate", values="full_reprice_cr")[KEY_LABELS + ["Parallel"]]
+    wide = grid.pivot(index="shift_bp", columns="key_rate", values="full_reprice_cr")[key_labels(cfg.key_tenors) + ["Parallel"]]
     wide.to_csv(out / f"keyrate_bump_grid_wide_{tag}.csv")
     return out
 

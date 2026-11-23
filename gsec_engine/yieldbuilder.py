@@ -30,10 +30,9 @@ from scipy.optimize import least_squares
 from .bonds import Bond, Instrument, instrument_from_bond, ytm_from_dirty
 from .config import EngineConfig
 from .conventions import add_months, settlement_date, to_date
-from .curves import KEYS, BumpInterpolator, ParShift, SvenssonCurve
+from .curves import BumpInterpolator, ParShift, SvenssonCurve, key_labels
 from .store import Store, bond_from_row
 
-KEY_LABELS = ["2Y", "5Y", "10Y", "30Y"]
 BUCKETS = [(0, 3, "<3Y"), (3, 7, "3-7Y"), (7, 12, "7-12Y"), (12, 20, "12-20Y"), (20, 99, "20Y+")]
 G_COLS = ["date", "model", "b0", "b1", "b2", "b3", "tau1", "tau2", "n_bonds", "rmse_bp",
           "rmse_traded_bp", "source", "fitted_at"]
@@ -437,7 +436,7 @@ def build(store: Store, on: date | None = None) -> dict:
     points = pd.DataFrame(pts)
     par = parsed["par"]
     key = []
-    for lab, k in zip(KEY_LABELS, KEYS):
+    for lab, k in zip(key_labels(cfg.key_tenors), cfg.key_tenors):
         row = {"key_rate": lab}
         for name, c in curves.items():
             row[f"zero_{name}"] = float(c.zero(k))

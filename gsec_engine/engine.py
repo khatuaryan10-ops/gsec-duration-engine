@@ -12,10 +12,10 @@ import pandas as pd
 from .calibration import calibrate
 from .config import EngineConfig
 from .conventions import settlement_date, to_date
-from .curves import KEYS, BumpInterpolator, ParShift
+from .curves import BumpInterpolator, ParShift, key_labels
 from .bonds import dirty_price, ytm_from_dirty
 from .portfolio import net_by_isin, positions_from_file, valuation_table
-from .risk import (KEY_LABELS, PortfolioPricer, convexity, historical_replay, krd_kr01,
+from .risk import (PortfolioPricer, calib_matches, convexity, historical_replay, krd_kr01,
                    pc_exposures, scenario_table)
 from .store import Store
 
@@ -104,7 +104,9 @@ def run(valuation_date, cfg: EngineConfig | None = None, store: Store | None = N
                                  f"(limit {cfg.price_check_paise})")
     price_check = pd.DataFrame(pc_rows)
 
-    interp = BumpInterpolator(cfg.interpolation)
+    keys = np.asarray(cfg.key_tenors, float)
+    labels = key_labels(keys)
+    interp = BumpInterpolator(cfg.interpolation, keys=keys)
     pp = PortfolioPricer([p for p in positions], curve, interp)
     sens = krd_kr01(pp, cfg.kr_bump_bp)
     conv = convexity(pp, cfg.convexity_bump_bp)
@@ -122,7 +124,7 @@ def run(valuation_date, cfg: EngineConfig | None = None, store: Store | None = N
                      f"{sens_par['parallel_check_max_abs']:.2e} ({cfg.interpolation})")
 
     kr01_summary = pd.DataFrame({
-        "key_rate": KEY_LABELS,
+        "key_rate": labels,
         "net_KR01_inr": sens["net_kr01"],
         "gross_KR01_inr": sens["gross_kr01_per_key"],
         "portfolio_KRD": sens["portfolio_krd"],
@@ -133,10 +135,13 @@ def run(valuation_date, cfg: EngineConfig | None = None, store: Store | None = N
 
     try:
         calib, hist_scen = store.load_D()
-    except LookupError:
+        if not calib_matches(calib, keys):
+            raise LookupError("key tenors changed")
+    except LookupError as e:
         calib = run_calibration(store, cfg)
         calib, hist_scen = store.load_D()
-        flags.append("calibration (File D) was missing and was rebuilt for this run")
+        flags.append("calibration (File D) was " + ("missing" if "changed" not in str(e) else
+                     "for different key tenors") + " and was rebuilt for this run")
     pcs = pc_exposures(sens["net_kr01"], calib)
     scen = scenario_table(pp, sens, calib, cfg)
     hist = historical_replay(pp, hist_scen, cfg)
@@ -165,8 +170,9 @@ def run(valuation_date, cfg: EngineConfig | None = None, store: Store | None = N
         "run_at": datetime.now().isoformat(timespec="seconds"),
         "valuation_date": str(vd), "settlement_date": str(settle),
         "curve": {**cinfo, "date": str(cinfo["date"])},
-        "key_rates_today_pct": dict(zip(KEY_LABELS, curve.zero(KEYS).round(4).tolist())),
-        "key_par_yields_today_pct": dict(zip(KEY_LABELS, pp_par.par.par_yields(KEYS).round(4).tolist())),
+        "key_tenors": keys.tolist(), "key_labels": labels,
+        "key_rates_today_pct": dict(zip(labels, curve.zero(keys).round(4).tolist())),
+        "key_par_yields_today_pct": dict(zip(labels, pp_par.par.par_yields(keys).round(4).tolist())),
         "krd_bases": {"spot": "zero (spot) rates bumped at the key tenors",
                       "par": "semi-annual par yields bumped at the key tenors, zero curve re-bootstrapped"},
         "time_basis": cfg.time_basis, "interpolation": cfg.interpolation,
