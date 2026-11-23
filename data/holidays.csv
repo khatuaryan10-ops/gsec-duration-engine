@@ -1,0 +1,16 @@
+# G-sec market holidays, YYYY-MM-DD. Weekends are handled automatically.
+# 2026 source: user-supplied bank-holiday list (20-Nov-2026).
+# Excluded because the NS file has a published curve on that date (market was open):
+#   2026-01-01 New Year, 2026-03-04 Holi, 2026-05-27 Bakri-Eid, 2026-08-27 Bakri-Eid (regional), 2026-09-04 Janmashtami
+# 2024, 2025 and 2027+ holidays are not loaded yet.
+date
+2026-03-31
+2026-04-03
+2026-04-14
+2026-05-01
+2026-06-26
+2026-09-14
+2026-10-20
+2026-11-10
+2026-11-24
+2026-12-25
